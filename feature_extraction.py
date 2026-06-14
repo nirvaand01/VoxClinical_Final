@@ -1,20 +1,25 @@
 """
 Feature extraction backends for the NeuraSpeech agent pipeline.
 
-A single per-clip feature set (163 features) feeds both the PD and
-AD/Dementia models, plus a shared transcription helper:
+PD and AD/Dementia use independently-developed feature sets, so each
+modality gets its own extraction function (4 total) plus a shared
+transcription helper:
 
-  transcribe_audio                <- Whisper (base.en)
-  extract_pd_acoustic_features    <- 115 ac_* librosa features
-                                      (matches parkinsons_fusion_master.py
-                                       / best_model.joblib, one row per clip)
-  extract_pd_linguistic_features  <- li_*(30) + syn_*(11) + freq_/sem_/read_(7)
-                                      = 48 features (matches the same model)
+  transcribe_audio                     <- Whisper (base.en)
+  extract_pd_acoustic_features         <- 115 ac_* librosa features
+                                           (matches parkinsons_fusion_master.py
+                                            / best_model.joblib, one row per clip)
+  extract_pd_linguistic_features       <- li_*(30) + syn_*(11) + freq_/sem_/read_(7)
+                                           = 48 features (matches the same model)
+  extract_dementia_acoustic_features   <- 115 ac_* librosa features, expanded to
+                                           ac_*_mean/_std/_range (345 cols)
+  extract_dementia_linguistic_features <- 39 li_* + 4 sbert_* features, expanded to
+                                           _mean/_std/_range (129 cols)
 
-dementia_master_dataset.csv's 163 feature columns are exactly this same
-ac_*/li_*/syn_*/freq_*/read_*/sem_* set, one row per clip (no subject-level
-aggregation), which is what dementia/results_v3/best_model.joblib (v4
-retrain) is trained on.
+dementia_fusion_v3_SVM.py was trained on SUBJECT-LEVEL aggregates
+(mean/std/range across a subject's clips). For a single inference clip
+there is no within-subject variance to observe, so the AD extractors
+report the clip's raw value as "_mean" and 0.0 for "_std"/"_range".
 
 The PD li_*/syn_*/freq_/sem_/read_ set reconstructs the columns of
 parkinsons_master_dataset.csv from model2_linguistic.py +
@@ -36,6 +41,7 @@ import numpy as np
 # ─────────────────────────────────────────────────────────────────────────
 _whisper_model = None
 _nlp = None
+_sbert_model = None
 _brown_freq = None
 _total_brown = None
 _top5000 = None
@@ -57,6 +63,14 @@ def _get_nlp():
         import spacy
         _nlp = spacy.load("en_core_web_sm")
     return _nlp
+
+
+def _get_sbert():
+    global _sbert_model
+    if _sbert_model is None:
+        from sentence_transformers import SentenceTransformer
+        _sbert_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _sbert_model
 
 
 def _get_nltk_resources():
@@ -190,6 +204,21 @@ def _extract_acoustic_raw(audio_path: str) -> dict:
 def extract_pd_acoustic_features(audio_path: str) -> dict:
     """115 ac_* features for the PD fusion model (best_model.joblib)."""
     return _extract_acoustic_raw(audio_path)
+
+
+def extract_dementia_acoustic_features(audio_path: str) -> dict:
+    """
+    345 ac_*_mean/_std/_range features for the AD/dementia v3 model.
+    Single clip -> raw value reported as "_mean", 0.0 for "_std"/"_range"
+    (no within-subject variance observable from one clip).
+    """
+    raw = _extract_acoustic_raw(audio_path)
+    out = {}
+    for k, v in raw.items():
+        out[f"{k}_mean"]  = v
+        out[f"{k}_std"]   = 0.0
+        out[f"{k}_range"] = 0.0
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -433,4 +462,152 @@ def _extract_nltk_features(text: str) -> dict:
         "read_flesch_kincaid_grade": fk_grade,
         "read_flesch_reading_ease": fre,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# DEMENTIA/AD LINGUISTIC: li_*(39) + sbert_*(4) -> _mean/_std/_range = 129
+# ─────────────────────────────────────────────────────────────────────────
+DEM_FILLERS  = {"uh", "um", "er", "ah", "hmm"}
+DEM_PRONOUNS = {"he", "she", "it", "they", "him", "her", "them", "this", "that", "these", "those"}
+
+
+def _dementia_linguistic_raw(text: str, words: list) -> dict:
+    nlp = _get_nlp()
+    f = {}
+
+    doc    = nlp(text if text.strip() else " ")
+    tokens = [t for t in doc if not t.is_space]
+    sents  = list(doc.sents)
+    n_sent = max(len(sents), 1)
+
+    words_lower = [t.text.lower() for t in tokens if t.is_alpha]
+    n_words     = max(len(words_lower), 1)
+    vocab       = set(words_lower)
+
+    f["li_ttr"]        = len(vocab) / n_words
+    f["li_vocab_size"] = len(vocab)
+    f["li_word_count"] = n_words
+
+    wl = [len(w) for w in words_lower]
+    f["li_avg_word_len"] = float(np.mean(wl)) if wl else 0.0
+    f["li_std_word_len"] = float(np.std(wl))  if wl else 0.0
+
+    content_lemmas = [t.lemma_.lower() for t in tokens if t.is_alpha and not t.is_stop]
+    f["li_lemma_ttr"] = len(set(content_lemmas)) / max(len(content_lemmas), 1)
+
+    sl = [len([t for t in s if t.is_alpha]) for s in sents]
+    f["li_avg_sent_len"]  = float(np.mean(sl)) if sl else 0.0
+    f["li_std_sent_len"]  = float(np.std(sl))  if sl else 0.0
+    f["li_num_sentences"] = n_sent
+
+    pos_counts = Counter(t.pos_ for t in tokens if t.is_alpha)
+    f["li_noun_ratio"] = pos_counts.get("NOUN", 0) / n_words
+    f["li_verb_ratio"] = pos_counts.get("VERB", 0) / n_words
+    f["li_adj_ratio"]  = pos_counts.get("ADJ", 0)  / n_words
+    f["li_adv_ratio"]  = pos_counts.get("ADV", 0)  / n_words
+    f["li_pron_ratio"] = pos_counts.get("PRON", 0) / n_words
+    f["li_noun_verb_ratio"] = pos_counts.get("NOUN", 0) / max(pos_counts.get("VERB", 1), 1)
+    n_stop = sum(1 for t in tokens if t.is_alpha and t.is_stop)
+    f["li_stop_word_ratio"] = n_stop / n_words
+
+    dep_dists = [abs(t.i - t.head.i) for t in tokens if t.dep_ != "ROOT"]
+    f["li_mean_dep_dist"] = float(np.mean(dep_dists)) if dep_dists else 0.0
+    f["li_std_dep_dist"]  = float(np.std(dep_dists))  if dep_dists else 0.0
+
+    def sent_depth(sent):
+        roots = [t for t in sent if t.dep_ == "ROOT"]
+        if not roots:
+            return 0
+        def depth(tok):
+            children = list(tok.children)
+            return 1 + max((depth(c) for c in children), default=0)
+        return depth(roots[0])
+
+    depths = [sent_depth(s) for s in sents]
+    f["li_avg_parse_depth"] = float(np.mean(depths)) if depths else 0.0
+
+    f["li_ner_count"]        = len(doc.ents)
+    f["li_ner_per_sentence"] = len(doc.ents) / n_sent
+
+    bigrams  = list(zip(words_lower, words_lower[1:]))
+    trigrams = list(zip(words_lower, words_lower[1:], words_lower[2:]))
+    f["li_bigram_rep"]  = (len(bigrams)  - len(set(bigrams)))  / max(len(bigrams),  1)
+    f["li_trigram_rep"] = (len(trigrams) - len(set(trigrams))) / max(len(trigrams), 1)
+    f["li_top_word_dom"] = (Counter(words_lower).most_common(1)[0][1] / n_words) if words_lower else 0.0
+
+    n_fill = sum(1 for w in words_lower if w in DEM_FILLERS)
+    f["li_filler_ratio"] = n_fill / n_words
+    f["li_filler_count"] = n_fill
+
+    n_vague_pron = sum(1 for w in words_lower if w in DEM_PRONOUNS)
+    f["li_vague_pronoun_ratio"] = n_vague_pron / n_words
+
+    if len(words) >= 2:
+        durs       = [e - s for _, s, e in words]
+        gaps       = [words[i + 1][1] - words[i][2] for i in range(len(words) - 1)]
+        gaps_c     = [g for g in gaps if g >= 0]
+        total_sp   = sum(durs)
+        total_time = words[-1][2] - words[0][1]
+
+        f["li_avg_word_dur"]     = float(np.mean(durs))
+        f["li_std_word_dur"]     = float(np.std(durs))
+        f["li_avg_gap"]          = float(np.mean(gaps_c)) if gaps_c else 0.0
+        f["li_std_gap"]          = float(np.std(gaps_c))  if gaps_c else 0.0
+        f["li_max_pause"]        = float(max(gaps_c)) if gaps_c else 0.0
+        f["li_long_pause_count"] = sum(1 for g in gaps_c if g > 0.5)
+        f["li_long_pause_ratio"] = f["li_long_pause_count"] / max(len(gaps_c), 1)
+        f["li_speech_rate"]    = len(words) / max(total_time, 1e-3)
+        f["li_articu_rate"]    = len(words) / max(total_sp, 1e-3)
+        f["li_speaking_ratio"] = total_sp / max(total_time, 1e-3)
+        f["li_chars_per_sec"]  = len(text.replace(" ", "")) / max(total_time, 1e-3)
+
+        long_word_pre_gaps = []
+        for i, (word, _, _) in enumerate(words[1:], 1):
+            if len(word) >= 6:
+                g = words[i][1] - words[i - 1][2]
+                if g >= 0:
+                    long_word_pre_gaps.append(g)
+        f["li_noun_finding_pause"] = float(np.mean(long_word_pre_gaps)) if long_word_pre_gaps else 0.0
+    else:
+        for k in ["li_avg_word_dur", "li_std_word_dur", "li_avg_gap", "li_std_gap",
+                  "li_max_pause", "li_long_pause_count", "li_long_pause_ratio",
+                  "li_speech_rate", "li_articu_rate", "li_speaking_ratio", "li_chars_per_sec",
+                  "li_noun_finding_pause"]:
+            f[k] = 0.0
+
+    return f
+
+
+def _extract_sbert_raw(text: str) -> dict:
+    sents = [s.strip() for s in re.split(r"[.!?]+", text.strip()) if len(s.strip()) > 10]
+    if len(sents) < 2:
+        return {"sbert_coherence_mean": 0.5, "sbert_coherence_std": 0.0,
+                "sbert_coherence_min": 0.5, "sbert_topic_drift": 0.0}
+
+    model = _get_sbert()
+    embs = model.encode(sents, convert_to_numpy=True, show_progress_bar=False)
+    embs = embs / (np.linalg.norm(embs, axis=1, keepdims=True) + 1e-9)
+    sims = [float(np.dot(embs[i], embs[i + 1])) for i in range(len(embs) - 1)]
+    return {
+        "sbert_coherence_mean": float(np.mean(sims)),
+        "sbert_coherence_std":  float(np.std(sims)),
+        "sbert_coherence_min":  float(np.min(sims)),
+        "sbert_topic_drift":    float(np.dot(embs[0], embs[-1])),
+    }
+
+
+def extract_dementia_linguistic_features(transcript: str, words: list) -> dict:
+    """
+    li_*(39) + sbert_*(4) = 43 raw features, expanded to _mean/_std/_range (129).
+    Single clip -> raw value reported as "_mean", 0.0 for "_std"/"_range".
+    """
+    text = transcript or ""
+    raw = {**_dementia_linguistic_raw(text, words), **_extract_sbert_raw(text)}
+
+    out = {}
+    for k, v in raw.items():
+        out[f"{k}_mean"]  = v
+        out[f"{k}_std"]   = 0.0
+        out[f"{k}_range"] = 0.0
+    return out
 

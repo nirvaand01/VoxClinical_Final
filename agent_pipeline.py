@@ -30,6 +30,8 @@ from feature_extraction import (
     transcribe_audio,
     extract_pd_acoustic_features,
     extract_pd_linguistic_features,
+    extract_dementia_acoustic_features,
+    extract_dementia_linguistic_features,
 )
 
 # ─────────────────────────────────────────────
@@ -413,21 +415,30 @@ def run_pipeline(audio_path: str = None, text: str = None) -> dict:
         print(f"  transcript length: {len(transcript.split())} words")
 
     # ── Deterministic: Feature Extraction ─────────────────────
-    # PD and AD/Dementia models share the same per-clip acoustic +
-    # linguistic feature set (163 features).
-    features = {}
+    # PD and AD/Dementia use independently-trained feature sets,
+    # so each disease gets its own acoustic + linguistic extraction.
+    pd_features = {}
+    ad_features = {}
 
     if routing["use_audio"] and audio_path:
-        print("[Tool] Extracting acoustic features...")
-        features.update(extract_pd_acoustic_features(audio_path))
-        print(f"  extracted {len(features)} acoustic features")
+        print("[Tool] Extracting PD acoustic features...")
+        pd_features.update(extract_pd_acoustic_features(audio_path))
+        print(f"  extracted {len(pd_features)} PD acoustic features")
+
+        print("[Tool] Extracting AD acoustic features...")
+        ad_features.update(extract_dementia_acoustic_features(audio_path))
+        print(f"  extracted {len(ad_features)} AD acoustic features")
 
     if routing["use_text"] and transcript:
-        print("[Tool] Extracting linguistic features...")
-        features.update(extract_pd_linguistic_features(transcript, words))
-        print(f"  feature total: {len(features)}")
+        print("[Tool] Extracting PD linguistic features...")
+        pd_features.update(extract_pd_linguistic_features(transcript, words))
+        print(f"  PD feature total: {len(pd_features)}")
 
-    if not features:
+        print("[Tool] Extracting AD linguistic features...")
+        ad_features.update(extract_dementia_linguistic_features(transcript, words))
+        print(f"  AD feature total: {len(ad_features)}")
+
+    if not pd_features and not ad_features:
         return {
             "error": "No features could be extracted",
             "stage": "feature_extraction"
@@ -435,11 +446,11 @@ def run_pipeline(audio_path: str = None, text: str = None) -> dict:
 
     # ── Deterministic: ML Models ──────────────────────────────
     print("[Tool] Running PD model...")
-    pd_score, pd_shap = run_pd_model(features) if features else (None, {})
+    pd_score, pd_shap = run_pd_model(pd_features) if pd_features else (None, {})
     print(f"  PD score: {pd_score:.3f}" if pd_score is not None else "  PD score: unavailable")
 
     print("[Tool] Running AD model...")
-    ad_score, ad_shap = run_ad_model(features) if features else (None, {})
+    ad_score, ad_shap = run_ad_model(ad_features) if ad_features else (None, {})
     print(f"  AD score: {ad_score:.3f}" if ad_score is not None else "  AD score: unavailable")
 
     # get top 3 pseudo-SHAP features for each model
