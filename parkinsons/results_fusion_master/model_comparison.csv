@@ -1,0 +1,4 @@
+Model,Accuracy,Precision,Recall,F1,ROC-AUC,GridCV_AUC,Best Params
+XGBoost,0.75,0.7142857142857143,0.6666666666666666,0.6896551724137931,0.7873015873015873,0.73,"{'clf__learning_rate': 0.03, 'clf__max_depth': 2, 'clf__n_estimators': 100, 'clf__subsample': 1.0}"
+Random Forest,0.8055555555555556,0.7857142857142857,0.7333333333333333,0.7586206896551724,0.8222222222222222,0.8300000000000001,"{'clf__max_depth': 3, 'clf__min_samples_leaf': 2, 'clf__n_estimators': 200}"
+SVM,0.0,0.0,0.0,0.0,0.9968253968253967,0.8133333333333332,"{'clf__C': 0.1, 'clf__gamma': 'scale'}"
