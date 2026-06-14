@@ -16,11 +16,6 @@ transcription helper:
   extract_dementia_linguistic_features <- 39 li_* + 4 sbert_* features, expanded to
                                            _mean/_std/_range (129 cols)
 
-dementia_fusion_v3_SVM.py was trained on SUBJECT-LEVEL aggregates
-(mean/std/range across a subject's clips). For a single inference clip
-there is no within-subject variance to observe, so the AD extractors
-report the clip's raw value as "_mean" and 0.0 for "_std"/"_range".
-
 The PD li_*/syn_*/freq_/sem_/read_ set reconstructs the columns of
 parkinsons_master_dataset.csv from model2_linguistic.py +
 add_syntactic_features.py + add_nltk_features.py. A handful of columns
@@ -209,8 +204,6 @@ def extract_pd_acoustic_features(audio_path: str) -> dict:
 def extract_dementia_acoustic_features(audio_path: str) -> dict:
     """
     345 ac_*_mean/_std/_range features for the AD/dementia v3 model.
-    Single clip -> raw value reported as "_mean", 0.0 for "_std"/"_range"
-    (no within-subject variance observable from one clip).
     """
     raw = _extract_acoustic_raw(audio_path)
     out = {}
@@ -599,7 +592,6 @@ def _extract_sbert_raw(text: str) -> dict:
 def extract_dementia_linguistic_features(transcript: str, words: list) -> dict:
     """
     li_*(39) + sbert_*(4) = 43 raw features, expanded to _mean/_std/_range (129).
-    Single clip -> raw value reported as "_mean", 0.0 for "_std"/"_range".
     """
     text = transcript or ""
     raw = {**_dementia_linguistic_raw(text, words), **_extract_sbert_raw(text)}
